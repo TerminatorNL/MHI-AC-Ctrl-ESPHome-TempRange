@@ -1,9 +1,9 @@
 # Version 2.0
 substitutions:
   # Unique device ID in HA
-  deviceid: "mhi_ac_ctrl"
+  deviceid: "airco_bedroom"
   # Unique device name in HA (sensor names will be prefixed by this name)
-  devicename: "MHI-AC-Ctrl"
+  devicename: "Airco bedroom"
   # The WiFi network to connect to
   wifi_ssid: !secret wifi_ssid
   # The WiFi password

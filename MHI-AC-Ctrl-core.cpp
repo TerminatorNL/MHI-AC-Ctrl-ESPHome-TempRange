@@ -122,6 +122,18 @@ void MHI_AC_Ctrl_Core::set_frame_size(byte framesize) {
     frameSize = framesize;
 }
 
+void MHI_AC_Ctrl_Core::set_immediate_troom_requests(uint16_t count){
+  immediate_troom_requests = count;
+}
+
+uint16_t MHI_AC_Ctrl_Core::get_immediate_troom_request_count(){
+  return immediate_troom_requests;
+}
+
+void MHI_AC_Ctrl_Core::set_min_time_internal_troom(long min_duration_ms){
+  minTimeBetweenRoomTemperatureSamples = min_duration_ms;
+}
+
 int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
   const byte opdataCnt = sizeof(opdata) / sizeof(byte) / 2;
   static byte opdataNo = 0;               //
@@ -137,11 +149,18 @@ int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
 
   static uint call_counter = 0;           // counts how often this loop was called
   static unsigned long lastTroomInternalMillis = 0; // remember when Troom internal has changed
+
   if (frameSize == 33)
     MISO_frame[0] = 0xAA;
-
    
+
   call_counter++;
+  // Prevent overflow resulting in error codes after running continously.
+  // This would only happen after 3,4 years (50 ms per frame)
+  if(call_counter > __INT_MAX__){
+    call_counter = 0;
+  }
+
   int SCKMillis = millis();               // time of last SCK low level
   while (millis() - SCKMillis < 5) {      // wait for 5ms stable high signal to detect a frame start
     if (!digitalRead(SCK_PIN))
@@ -329,13 +348,14 @@ int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
         status_troom_old = MOSI_frame[DB3];
         m_cbiStatus->cbiStatusFunction(status_troom, status_troom_old);
         lastTroomInternalMillis = 0;
-      }
-      else                                                               //  internal sensor used
-        if ((unsigned long)(millis() - lastTroomInternalMillis) > minTimeInternalTroom) { // Only publish when last change was more then minTimeInternalTroom ago
-          lastTroomInternalMillis = millis();
-          status_troom_old = MOSI_frame[DB3];
-          m_cbiStatus->cbiStatusFunction(status_troom, status_troom_old);
+      } else if (((unsigned long)(millis() - lastTroomInternalMillis) > minTimeBetweenRoomTemperatureSamples) || immediate_troom_requests > 0) { // Only publish when last change was more then minTimeBetweenRoomTemperatureSamples ago or publish when there's active requests for troom.
+        lastTroomInternalMillis = millis();
+        status_troom_old = MOSI_frame[DB3];
+        if(immediate_troom_requests > 0){
+          immediate_troom_requests--;
         }
+        m_cbiStatus->cbiStatusFunction(status_troom, status_troom_old);
+      }
     }
     
     if (MOSI_frame[DB2] != status_tsetpoint_old) { // Temperature setpoint

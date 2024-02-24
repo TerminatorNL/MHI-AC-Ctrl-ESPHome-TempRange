@@ -29,7 +29,7 @@ const byte opdata[][2] PROGMEM = {
 
 //#define NoFramesPerPacket 20                 // number of frames/packet, must be an even number
 #define NoFramesPerOpDataCycle 400             // number of frames used for a OpData request cycle; will be 20s (20 frames are 1s)
-#define minTimeInternalTroom 5000              // minimal time in ms used for Troom internal sensor changes for publishing to avoid jitter 
+#define defaultMinTimeInternalTroom 5000       // minimal time in ms used for Troom internal sensor changes for publishing to avoid jitter. See also: MHI_AC_Ctrl_Core::set_min_time_internal_troom for adjusting this value on the fly.
 
 // pin defintions
 #define SCK_PIN  14
@@ -163,6 +163,13 @@ class MHI_AC_Ctrl_Core {
     byte new_3Dauto = 0;
     byte frameSize = 20;
 
+    // How many samples to return to the callback interface without waiting for minTimeInternalTroom.
+    uint16_t immediate_troom_requests = 0;
+
+    // The current minimum time between temperature samples.
+    unsigned long minTimeBetweenRoomTemperatureSamples = defaultMinTimeInternalTroom;
+
+    // The callback interface
     CallbackInterface_Status *m_cbiStatus;
 
   public:
@@ -186,5 +193,7 @@ class MHI_AC_Ctrl_Core {
     void set_frame_size(byte framesize);  // set framesize to 20 or 33
     void set_3Dauto(AC3Dauto Dauto);      // set the requested 3D auto mode
     void set_vanesLR(uint vanesLR);       // set the vanes vertical position
-
+    void set_immediate_troom_requests(uint16_t count);      // Set the amount of active requests for immediate temperature measurements.
+    uint16_t get_immediate_troom_request_count();           // Get the amount of active requests for immediate temperature measurements. Useful to see how many requests have already been fulfilled.
+    void set_min_time_internal_troom(long min_duration_ms); // Set the interval temperature updates that aren't immediate requests. The default is 5000.
 };

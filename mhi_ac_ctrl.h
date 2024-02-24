@@ -27,9 +27,9 @@ static const std::vector<std::string> protection_states = {
 };
 
 static const char* TAG = "mhi_ac_ctrl";
+static bool enable_troom_offset = true;
 
 float internal_sensor_temperature_offset = 0.0f; // This is the offset we apply to the value from the internal temperature sensor and feed back in to the external temperature sensor.
-float last_internal_sensor_temperature = 18.0f; // This is the unmodified temperature from the internal temperature sensor.
 
 class MhiAcCtrl : public climate::Climate,
                   public Component,
@@ -56,6 +56,10 @@ public:
         if (isnan(this->target_temperature))
             this->target_temperature = 20;
 
+        temperature_offset_.set_icon("mdi:thermometer");
+        temperature_offset_.set_unit_of_measurement("°C");
+        temperature_offset_.set_accuracy_decimals(2);
+        
         error_code_.set_icon("mdi:alert-circle");
 
         outdoor_temperature_.set_icon("mdi:thermometer");
@@ -131,10 +135,33 @@ public:
 
     void loop() override
     {
-        set_room_temperature(last_internal_sensor_temperature + internal_sensor_temperature_offset);
-        int ret = mhi_ac_ctrl_core.loop(100);
-        if (ret < 0)
-            ESP_LOGW("mhi_ac_ctrl", "mhi_ac_ctrl_core.loop error: %i", ret);
+        static uint32_t last_real_update = millis();
+        static float actual_room_temperature = 20.0f;
+
+        int code;
+        if(this->mode == climate::CLIMATE_MODE_HEAT){
+            uint32_t now = millis();
+            if(now - last_real_update > 10000){
+                last_real_update = now;
+                mhi_ac_ctrl_core.set_troom(0xff);
+                mhi_ac_ctrl_core.set_immediate_troom_requests(1);
+                code = mhi_ac_ctrl_core.loop(100);
+                actual_room_temperature = this->current_temperature;
+                ESP_LOGD("mhi_ac_ctrl", "Fetched real room temperature from AC: %f", actual_room_temperature);
+            }else{
+                code = mhi_ac_ctrl_core.loop(100);
+            }
+            if(enable_troom_offset){
+                set_room_temperature(actual_room_temperature + internal_sensor_temperature_offset);
+            }
+        }else{
+            code = mhi_ac_ctrl_core.loop(100);
+            actual_room_temperature = this->current_temperature;
+        }
+        // Code can only be less than 0 when an error was encountered, otherwise, it's an increasing counter.
+        if (code < 0){
+            ESP_LOGW("mhi_ac_ctrl", "mhi_ac_ctrl_core.loop error: %i", code);
+        }
     }
 
     void dump_config() override
@@ -330,7 +357,7 @@ public:
             // itoa(value, strtmp, 10);
             // output_P(status, PSTR(TOPIC_TSETPOINT), strtmp);
             this->target_temperature = (value & 0x7f)/ 2.0;
-            internal_sensor_temperature_offset = 0.0f;
+            unset_room_temperature();
             this->publish_state();
             break;
         case status_errorcode:
@@ -343,7 +370,6 @@ public:
         case erropdata_return_air:
             // dtostrf(value * 0.25f - 15, 0, 2, strtmp);
             // output_P(status, PSTR(TOPIC_RETURNAIR), strtmp);
-            last_internal_sensor_temperature = value * 0.25f - 15;
             return_air_temperature_.publish_state(value * 0.25f - 15);
             break;
         case opdata_thi_r1:
@@ -470,6 +496,7 @@ public:
 
     std::vector<Sensor *> get_sensors() {
         return {
+            &temperature_offset_,
             &error_code_,
             &outdoor_temperature_,
             &return_air_temperature_,
@@ -502,11 +529,19 @@ public:
         return { &defrost_ };
     }
 
+    // Disallow the use of the internal sensor and set the internal temperature.
     void set_room_temperature(float value) {
         if ((value > -10) & (value < 48)) {
             byte tmp = value*4+61;
             mhi_ac_ctrl_core.set_troom(value*4+61);
         }
+    }
+
+    // Allow the use of the internal sensor.
+    void unset_room_temperature(){
+        internal_sensor_temperature_offset = 0.0f;
+        temperature_offset_.publish_state(internal_sensor_temperature_offset);
+        mhi_ac_ctrl_core.set_troom(0xff);
     }
 
     void set_vanes(int value) {
@@ -532,6 +567,11 @@ public:
         ESP_LOGD("mhi_ac_ctrl", "set vanes Left Right: %i", value);
     }
 
+
+    void enable_offset(bool value) {
+        enable_troom_offset = value;
+    }
+
 protected:
     /// Transmit the state of this climate controller.
     void control(const climate::ClimateCall& call) override
@@ -540,26 +580,32 @@ protected:
             this->mode = *call.get_mode();
 
             power_ = power_on;
-            internal_sensor_temperature_offset = 0.0f;
             switch (this->mode) {
             case climate::CLIMATE_MODE_OFF:
+                unset_room_temperature();
                 power_ = power_off;
                 break;
             case climate::CLIMATE_MODE_COOL:
+                unset_room_temperature();
                 mode_ = mode_cool;
                 break;
             case climate::CLIMATE_MODE_HEAT:
                 internal_sensor_temperature_offset = clamp(minimum_temperature_ - this->target_temperature, 0.0f, minimum_temperature_ - visual_minimum_temperature_);
+                temperature_offset_.publish_state(internal_sensor_temperature_offset);
                 mode_ = mode_heat;
                 break;
             case climate::CLIMATE_MODE_DRY:
+                unset_room_temperature();
                 mode_ = mode_dry;
                 break;
             case climate::CLIMATE_MODE_FAN_ONLY:
+                unset_room_temperature();
                 mode_ = mode_fan;
                 break;
             case climate::CLIMATE_MODE_HEAT_COOL:
+                unset_room_temperature();
             default:
+                unset_room_temperature();
                 mode_ = mode_auto;
                 break;
             }
@@ -574,8 +620,12 @@ protected:
             if(this->mode == climate::CLIMATE_MODE_HEAT){
                 // We clamp the offset to only positive values. This means we can not use this method for heating above 30°C, that's intentional.
                 internal_sensor_temperature_offset = clamp(minimum_temperature_ - this->target_temperature, 0.0f, minimum_temperature_ - visual_minimum_temperature_);
+                temperature_offset_.publish_state(internal_sensor_temperature_offset);
+                if(internal_sensor_temperature_offset == 0.0f){
+                    unset_room_temperature();
+                }
             }else{
-                internal_sensor_temperature_offset = 0.0f;
+                unset_room_temperature();
             }
             tsetpoint_ = clamp(this->target_temperature, minimum_temperature_, maximum_temperature_);
 
@@ -667,6 +717,7 @@ protected:
 
     MHI_AC_Ctrl_Core mhi_ac_ctrl_core;
 
+    Sensor temperature_offset_;
     Sensor error_code_;
     Sensor outdoor_temperature_;
     Sensor return_air_temperature_;
